@@ -1,4 +1,4 @@
-name: Build exact Hermes deploy bundle 0aa760f
+name: Build exact Hermes deploy bundle 0aa760f split transfer
 
 on:
   push:
@@ -45,7 +45,7 @@ jobs:
           sort -o /tmp/expected-paths.txt /tmp/expected-paths.txt
           diff -u /tmp/expected-paths.txt /tmp/actual-paths.txt
 
-      - name: Create and verify complete-history bundle
+      - name: Create verify and split exact complete-history bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -58,12 +58,15 @@ jobs:
           git bundle create "$BUNDLE" refs/heads/deploy-target
           git bundle verify "$BUNDLE"
           test "$(git bundle list-heads "$BUNDLE" refs/heads/deploy-target | awk '{print $1}')" = "$TARGET"
-          sha256sum "$BUNDLE" | tee "${BUNDLE}.sha256"
 
           rm -rf /tmp/bundle-verify
           git clone -q -b deploy-target "$BUNDLE" /tmp/bundle-verify
           test "$(git -C /tmp/bundle-verify rev-parse refs/heads/deploy-target)" = "$TARGET"
           test "$(git -C /tmp/bundle-verify rev-parse refs/heads/deploy-target^{tree})" = "$TARGET_TREE"
+
+          sha256sum "$BUNDLE" | tee "${BUNDLE}.sha256"
+          split -b 250M -d -a 2 "$BUNDLE" "${BUNDLE}.part-"
+          sha256sum "${BUNDLE}.part-"* > "${BUNDLE}.parts.sha256"
 
           cat > deploy-manifest.txt <<EOF
           TARGET_HEAD=$TARGET
@@ -73,15 +76,35 @@ jobs:
           HISTORY=COMPLETE
           NET_COMMITS_FROM_LIVE=1
           NET_CHANGED_FILES=7
-          BUNDLE=hermes-agent-0aa760f.bundle
+          BUNDLE=$BUNDLE
+          SPLIT_SIZE=250M
           EOF
 
-      - name: Upload exact bundle artifact
+          ls -lh "$BUNDLE" "${BUNDLE}.part-"*
+          cat "${BUNDLE}.sha256"
+          cat "${BUNDLE}.parts.sha256"
+
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: hermes-management-conversation-0aa760f-git-bundle
+          name: hermes-0aa760f-part-00
+          path: hermes-agent-0aa760f.bundle.part-00
+          if-no-files-found: error
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-0aa760f-part-01
+          path: hermes-agent-0aa760f.bundle.part-01
+          if-no-files-found: error
+
+      - name: Upload part 02 and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-0aa760f-part-02-manifest
           path: |
-            hermes-agent-0aa760f.bundle
+            hermes-agent-0aa760f.bundle.part-02
             hermes-agent-0aa760f.bundle.sha256
+            hermes-agent-0aa760f.bundle.parts.sha256
             deploy-manifest.txt
           if-no-files-found: error
