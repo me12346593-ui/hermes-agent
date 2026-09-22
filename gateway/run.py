@@ -4111,6 +4111,75 @@ def _get_channel_override(
     return None
 
 
+def _resolve_turn_execution_limits(
+    config: Optional[GatewayConfig],
+    source: SessionSource,
+    user_config: Optional[dict],
+) -> tuple[int, Optional[float], Optional[float]]:
+    """Resolve global turn limits, then overlay this channel's values.
+
+    The result is turn-local.  In particular, this never mutates the global
+    config or process environment, and ``gateway_timeout`` is not copied onto
+    a cached agent.
+    """
+    from agent.agent_init import _normalize_run_budget_seconds
+    from hermes_cli.config import resolve_turn_limit
+
+    max_iterations = _current_max_iterations()
+    agent_config = (user_config or {}).get("agent") or {}
+    if not isinstance(agent_config, dict):
+        agent_config = {}
+    run_budget_seconds = _normalize_run_budget_seconds(
+        agent_config.get("run_budget_seconds")
+    )
+
+    gateway_timeout_raw = _float_env("HERMES_AGENT_TIMEOUT", 1800)
+    gateway_timeout = (
+        gateway_timeout_raw if gateway_timeout_raw > 0 else None
+    )
+
+    override = None
+    if config is not None:
+        override = _get_channel_override(
+            config,
+            source.platform,
+            str(source.chat_id or ""),
+            thread_id=(
+                str(getattr(source, "thread_id", None))
+                if getattr(source, "thread_id", None)
+                else None
+            ),
+            parent_id=(
+                str(getattr(source, "parent_chat_id", None))
+                if getattr(source, "parent_chat_id", None)
+                else None
+            ),
+        )
+
+    if override is not None:
+        if override.max_turns is not None:
+            max_iterations = resolve_turn_limit(
+                override.max_turns, default=max_iterations
+            )
+        if override.run_budget_seconds is not None:
+            run_budget_seconds = _normalize_run_budget_seconds(
+                override.run_budget_seconds
+            )
+        if override.gateway_timeout is not None:
+            raw_timeout = override.gateway_timeout
+            if not isinstance(raw_timeout, bool):
+                try:
+                    timeout_value = float(raw_timeout)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    gateway_timeout = (
+                        timeout_value if timeout_value > 0 else None
+                    )
+
+    return max_iterations, run_budget_seconds, gateway_timeout
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -5719,7 +5788,14 @@ class TurnRunner:
         if cfg_channel_prompt:
             combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
-        max_iterations = _current_max_iterations()
+        max_iterations = ctx.max_iterations
+        run_budget_seconds = ctx.run_budget_seconds
+        if max_iterations is None:
+            # Preserve the standalone TurnContext/TurnRunner seam used by
+            # tests and internal callers that predate turn-local limits.
+            max_iterations, run_budget_seconds, _ = _resolve_turn_execution_limits(
+                self._runner.config, ctx.source, ctx.user_config
+            )
 
         try:
             model, runtime_kwargs = self._runner._resolve_session_agent_runtime(
@@ -6036,10 +6112,12 @@ class TurnRunner:
                                 _cache.move_to_end(ctx.session_key)
                             except KeyError:
                                 pass
-                        self._runner._init_cached_agent_for_turn(agent, ctx._interrupt_depth)
-                        # Refresh agent max_iterations from current config
-                        # (cached agent may have been created with old config)
-                        agent.max_iterations = max_iterations
+                        self._runner._init_cached_agent_for_turn(
+                            agent,
+                            ctx._interrupt_depth,
+                            max_iterations=max_iterations,
+                            run_budget_seconds=run_budget_seconds,
+                        )
                         logger.debug("Reusing cached agent for session %s", ctx.session_key)
                         reused_cached_agent = True
 
@@ -6082,6 +6160,7 @@ class TurnRunner:
                 **turn_route["runtime"],
                 **_checkpoint_agent_kwargs(ctx.user_config),
                 max_iterations=max_iterations,
+                run_budget_seconds=run_budget_seconds,
                 quiet_mode=True,
                 verbose_logging=False,
                 enabled_toolsets=ctx.enabled_toolsets,
@@ -6115,6 +6194,11 @@ class TurnRunner:
                 # a single small file, not part of the expensive walk.
                 load_soul_identity=True,
             )
+            # AIAgent treats a None constructor value as "load global config".
+            # Re-apply the fully resolved turn-local value so an explicit
+            # channel value that normalizes to disabled cannot inherit the
+            # global budget.
+            agent.run_budget_seconds = run_budget_seconds
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -28598,7 +28682,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
     @staticmethod
-    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
+    def _init_cached_agent_for_turn(
+        agent: Any,
+        interrupt_depth: int,
+        *,
+        max_iterations: Optional[int] = None,
+        run_budget_seconds: Any = _AGENT_PENDING_SENTINEL,
+    ) -> None:
         """Reset per-turn state on a cached agent before a new turn starts.
 
         ``_last_activity_ts``, ``_last_activity_desc``, and
@@ -28624,6 +28714,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if hasattr(agent, "_last_flushed_db_idx"):
                 agent._last_flushed_db_idx = 0
         agent._api_call_count = 0
+        if max_iterations is not None:
+            agent.max_iterations = max_iterations
+        if run_budget_seconds is not _AGENT_PENDING_SENTINEL:
+            agent.run_budget_seconds = run_budget_seconds
 
     def _commit_memory_before_soft_evict(self, agent: Any, key: str) -> None:
         """Fire on_session_end extraction before soft-evicting a live agent.
@@ -29694,6 +29788,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
+        (
+            turn_max_iterations,
+            turn_run_budget_seconds,
+            turn_gateway_timeout,
+        ) = _resolve_turn_execution_limits(
+            getattr(self, "config", None), source, user_config
+        )
+
         enabled_toolsets = self._resolve_enabled_toolsets_for_source(
             user_config, source, platform_key
         )
@@ -29945,6 +30047,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             AIAgent=AIAgent,
             resolve_display_setting=resolve_display_setting,
             user_config=user_config,
+            max_iterations=turn_max_iterations,
+            run_budget_seconds=turn_run_budget_seconds,
+            gateway_timeout=turn_gateway_timeout,
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             log_mode_enabled=log_mode_enabled,
@@ -30529,11 +30634,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # but a hung API call or stuck tool with no activity for the
             # configured duration is caught and killed.  (#4815)
             #
-            # Config: agent.gateway_timeout in config.yaml, or
-            # HERMES_AGENT_TIMEOUT env var (env var takes precedence).
+            # Config: the resolved global agent.gateway_timeout / env value,
+            # optionally replaced for this channel and this turn only.
             # Default 1800s (30 min inactivity).  0 = unlimited.
-            _agent_timeout_raw = _float_env("HERMES_AGENT_TIMEOUT", 1800)
-            _agent_timeout = _agent_timeout_raw if _agent_timeout_raw > 0 else None
+            _agent_timeout = turn_ctx.gateway_timeout
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False

@@ -72,8 +72,11 @@ class TestTurnRunner:
     def test_normal_response_preserves_compression_exhausted(self):
         """A non-empty exhaustion response must still reach auto-reset consumers."""
 
+        init_kwargs = {}
+
         class _ExhaustedAgent:
             def __init__(self, **kwargs):
+                init_kwargs.update(kwargs)
                 self.model = kwargs["model"]
                 self.session_id = kwargs["session_id"]
                 self.tools = []
@@ -135,6 +138,9 @@ class TestTurnRunner:
             resolve_display_setting=lambda *_args: False,
             _run_still_current=lambda: True,
             _hooks_ref=SimpleNamespace(loaded_hooks=False),
+            max_iterations=8,
+            run_budget_seconds=120,
+            gateway_timeout=120,
         )
 
         from gateway.run import TurnRunner
@@ -145,3 +151,6 @@ class TestTurnRunner:
             "Context length exceeded. Cannot compress further."
         )
         assert result["compression_exhausted"] is True
+        assert init_kwargs["max_iterations"] == 8
+        assert init_kwargs["run_budget_seconds"] == 120
+        assert "gateway_timeout" not in init_kwargs

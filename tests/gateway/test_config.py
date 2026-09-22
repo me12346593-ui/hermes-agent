@@ -101,6 +101,9 @@ class TestPlatformConfigRoundtrip:
                     model="openrouter/healer-alpha",
                     provider="openrouter",
                     system_prompt="You are a daily news summarizer.",
+                    max_turns=8,
+                    run_budget_seconds=120,
+                    gateway_timeout=120,
                 ),
                 "9876543210": ChannelOverride(
                     model="anthropic/claude-opus-4.6",
@@ -112,16 +115,39 @@ class TestPlatformConfigRoundtrip:
         d = pc.to_dict()
         assert "channel_overrides" in d
         assert d["channel_overrides"]["1234567890"]["model"] == "openrouter/healer-alpha"
+        assert d["channel_overrides"]["1234567890"]["max_turns"] == 8
+        assert d["channel_overrides"]["1234567890"]["run_budget_seconds"] == 120
+        assert d["channel_overrides"]["1234567890"]["gateway_timeout"] == 120
         assert d["channel_overrides"]["9876543210"]["system_prompt"] == "You are a coding assistant."
         restored = PlatformConfig.from_dict(d)
         assert restored.channel_overrides["1234567890"].model == "openrouter/healer-alpha"
+        assert restored.channel_overrides["1234567890"].max_turns == 8
+        assert restored.channel_overrides["1234567890"].run_budget_seconds == 120
+        assert restored.channel_overrides["1234567890"].gateway_timeout == 120
         assert restored.channel_overrides["9876543210"].provider == "anthropic"
 
 
 class TestChannelOverride:
     def test_from_dict_empty(self):
-        assert ChannelOverride.from_dict({}).model is None
-        assert ChannelOverride.from_dict(None).model is None
+        for override in (ChannelOverride.from_dict({}), ChannelOverride.from_dict(None)):
+            assert override.model is None
+            assert override.provider is None
+            assert override.system_prompt is None
+            assert override.max_turns is None
+            assert override.run_budget_seconds is None
+            assert override.gateway_timeout is None
+            assert override.to_dict() == {}
+
+    def test_old_shape_roundtrip_omits_new_fields(self):
+        old = {
+            "model": "channel/model",
+            "provider": "openrouter",
+            "system_prompt": "Channel prompt",
+        }
+
+        restored = ChannelOverride.from_dict(old)
+
+        assert restored.to_dict() == old
 
 
 class TestPlatformConfigMalformedSections:

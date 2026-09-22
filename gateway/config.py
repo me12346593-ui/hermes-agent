@@ -596,7 +596,7 @@ class SessionResetPolicy:
 @dataclass
 class ChannelOverride:
     """
-    Per-channel override for model, provider, and system prompt.
+    Per-channel override for model, provider, system prompt, and turn limits.
 
     Used in config under platforms.<name>.channel_overrides[channel_id].
     Enables different channels (e.g. Discord #daily vs #dev) to use different
@@ -605,6 +605,9 @@ class ChannelOverride:
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
+    max_turns: Optional[int] = None
+    run_budget_seconds: Optional[float] = None
+    gateway_timeout: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -614,6 +617,12 @@ class ChannelOverride:
             out["provider"] = self.provider
         if self.system_prompt is not None:
             out["system_prompt"] = self.system_prompt
+        if self.max_turns is not None:
+            out["max_turns"] = self.max_turns
+        if self.run_budget_seconds is not None:
+            out["run_budget_seconds"] = self.run_budget_seconds
+        if self.gateway_timeout is not None:
+            out["gateway_timeout"] = self.gateway_timeout
         return out
 
     @classmethod
@@ -624,6 +633,9 @@ class ChannelOverride:
             model=data.get("model"),
             provider=data.get("provider"),
             system_prompt=data.get("system_prompt"),
+            max_turns=data.get("max_turns"),
+            run_budget_seconds=data.get("run_budget_seconds"),
+            gateway_timeout=data.get("gateway_timeout"),
         )
 
 
@@ -682,7 +694,8 @@ class PlatformConfig:
     # Telegram, Matrix, …) ignore it.
     typing_status_text: Optional[str] = None
 
-    # Per-channel model/provider/system_prompt overrides (channel_id -> ChannelOverride)
+    # Per-channel model/provider/system_prompt/turn-limit overrides
+    # (channel_id -> ChannelOverride)
     channel_overrides: Dict[str, ChannelOverride] = field(default_factory=dict)
 
     # Platform-specific settings

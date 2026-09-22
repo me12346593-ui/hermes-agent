@@ -4,10 +4,9 @@ When a long-lived gateway reuses an agent from its cache, the agent must run
 the *current* configured iteration budget — not the budget it was constructed
 with on the first turn of that session. Two pieces make that true:
 
-1. ``GatewayRunner._init_cached_agent_for_turn`` must NOT reset
-   ``max_iterations`` itself (the gateway refreshes it explicitly right after,
-   from current config). If this helper ever started clobbering it, the
-   gateway's refresh would be silently undone.
+1. ``GatewayRunner._init_cached_agent_for_turn`` leaves limits untouched when
+   no resolved turn values are supplied, and applies both ``max_iterations``
+   and ``run_budget_seconds`` together when the gateway supplies them.
 2. The per-turn budget object is rebuilt from ``agent.max_iterations`` at the
    start of every turn (``agent/turn_context.py`` -> ``IterationBudget``), so
    refreshing ``max_iterations`` on the cached agent is sufficient to change
@@ -24,7 +23,10 @@ from agent.iteration_budget import IterationBudget
 from agent.session_activity import ActivityProvenance
 
 
-def _make_cached_agent(max_iterations: int) -> SimpleNamespace:
+def _make_cached_agent(
+    max_iterations: int,
+    run_budget_seconds: float | None = None,
+) -> SimpleNamespace:
     """A minimal stand-in cached agent with the attributes the helpers touch."""
     # The turn loop checks both api_call_count >= max_iterations AND
     # iteration_budget.remaining <= 0 (turn_finalizer.py), so the budget must
@@ -37,6 +39,7 @@ def _make_cached_agent(max_iterations: int) -> SimpleNamespace:
         _api_call_count=42,
         _last_flushed_db_idx=5,
         max_iterations=max_iterations,
+        run_budget_seconds=run_budget_seconds,
         iteration_budget=IterationBudget(max_iterations),
     )
 
@@ -74,4 +77,57 @@ def test_init_cached_agent_preserves_max_iterations_on_interrupt_depth():
     # ...and max_iterations untouched.
     assert agent.max_iterations == 200
 
+
+def test_cached_agent_alternating_channels_refreshes_both_limits(monkeypatch):
+    """management -> normal -> management cannot leak either budget."""
+    from gateway.config import ChannelOverride, GatewayConfig, Platform, PlatformConfig
+    from gateway.run import GatewayRunner, _resolve_turn_execution_limits
+    from gateway.session import SessionSource
+
+    monkeypatch.setenv("HERMES_MAX_ITERATIONS", "90")
+    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "600")
+    config = GatewayConfig(
+        platforms={
+            Platform.DISCORD: PlatformConfig(
+                enabled=True,
+                channel_overrides={
+                    "management": ChannelOverride(
+                        max_turns=8,
+                        run_budget_seconds=120,
+                        gateway_timeout=120,
+                    ),
+                },
+            ),
+        },
+    )
+    user_config = {"agent": {"run_budget_seconds": 300}}
+    agent = _make_cached_agent(999, run_budget_seconds=999)
+
+    for chat_id, expected in (
+        ("management", (8, 120.0, 120.0)),
+        ("normal", (90, 300.0, 600.0)),
+        ("management", (8, 120.0, 120.0)),
+    ):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=chat_id,
+            user_id="u1",
+        )
+        max_iterations, run_budget_seconds, gateway_timeout = (
+            _resolve_turn_execution_limits(config, source, user_config)
+        )
+
+        GatewayRunner._init_cached_agent_for_turn(
+            agent,
+            interrupt_depth=0,
+            max_iterations=max_iterations,
+            run_budget_seconds=run_budget_seconds,
+        )
+
+        assert (
+            agent.max_iterations,
+            agent.run_budget_seconds,
+            gateway_timeout,
+        ) == expected
+        assert not hasattr(agent, "gateway_timeout")
 

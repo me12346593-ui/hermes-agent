@@ -10,7 +10,11 @@ from gateway.config import (
     Platform,
     PlatformConfig,
 )
-from gateway.run import _get_channel_override, GatewayRunner
+from gateway.run import (
+    GatewayRunner,
+    _get_channel_override,
+    _resolve_turn_execution_limits,
+)
 from gateway.session import SessionSource
 
 
@@ -67,6 +71,70 @@ class TestGetChannelOverride:
         )
         assert result is not None
         assert result.model == "topic-model"
+
+
+class TestResolveTurnExecutionLimits:
+    def test_management_values_override_global_for_current_turn(self, monkeypatch):
+        monkeypatch.setenv("HERMES_MAX_ITERATIONS", "90")
+        monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "600")
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    channel_overrides={
+                        "management": ChannelOverride(
+                            max_turns=8,
+                            run_budget_seconds=120,
+                            gateway_timeout=120,
+                        ),
+                    },
+                ),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="management",
+            user_id="u1",
+        )
+
+        resolved = _resolve_turn_execution_limits(
+            config,
+            source,
+            {"agent": {"run_budget_seconds": 300}},
+        )
+
+        assert resolved == (8, 120.0, 120.0)
+
+    def test_normal_channel_keeps_global_values(self, monkeypatch):
+        monkeypatch.setenv("HERMES_MAX_ITERATIONS", "90")
+        monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "600")
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    channel_overrides={
+                        "management": ChannelOverride(
+                            max_turns=8,
+                            run_budget_seconds=120,
+                            gateway_timeout=120,
+                        ),
+                    },
+                ),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="normal",
+            user_id="u1",
+        )
+
+        resolved = _resolve_turn_execution_limits(
+            config,
+            source,
+            {"agent": {"run_budget_seconds": 300}},
+        )
+
+        assert resolved == (90, 300.0, 600.0)
 
 
 class TestResolveModelForChannel:
@@ -152,5 +220,4 @@ class TestResolveSessionAgentRuntimePriority:
             )
         assert model == "channel/model"
         assert runtime["provider"] == "openrouter"
-
 

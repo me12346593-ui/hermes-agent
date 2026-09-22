@@ -97,6 +97,9 @@ class TurnContext:
     # (#82888). DB-only presentation metadata; never sent to the provider.
     persist_user_display_kind: Optional[str] = None
     user_config: Any = None
+    max_iterations: Optional[int] = None
+    run_budget_seconds: Optional[float] = None
+    gateway_timeout: Optional[float] = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None
     log_mode_enabled: bool = False
