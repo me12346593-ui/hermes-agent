@@ -1,0 +1,87 @@
+name: Build exact Hermes deploy bundle 0aa760f
+
+on:
+  push:
+    branches:
+      - transport/deploy-0aa760f-20260923
+    paths:
+      - .transport/deploy-0aa760f/READY
+
+permissions:
+  contents: read
+
+jobs:
+  build-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact target and base relation
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET=0aa760f7a4292c6f51a1f708e766a06848226660
+          TARGET_TREE=df27eb8da630939bc8dccd58e45f8d041c0c3eb8
+          LIVE_BASE=a0a63a1bc21115ba8da7fed6fdb695522dd37c96
+
+          test "$(git rev-parse ${TARGET}^{commit})" = "$TARGET"
+          test "$(git rev-parse ${TARGET}^{tree})" = "$TARGET_TREE"
+          git merge-base --is-ancestor "$LIVE_BASE" "$TARGET"
+          test "$(git rev-list --count ${LIVE_BASE}..${TARGET})" = "1"
+
+          git diff --name-only "${LIVE_BASE}..${TARGET}" | sort > /tmp/actual-paths.txt
+          cat > /tmp/expected-paths.txt <<'EOF'
+          gateway/config.py
+          gateway/run.py
+          gateway/turn_context.py
+          tests/gateway/test_cached_agent_max_iterations.py
+          tests/gateway/test_channel_overrides.py
+          tests/gateway/test_config.py
+          tests/gateway/test_turn_context.py
+          EOF
+          sort -o /tmp/expected-paths.txt /tmp/expected-paths.txt
+          diff -u /tmp/expected-paths.txt /tmp/actual-paths.txt
+
+      - name: Create and verify complete-history bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET=0aa760f7a4292c6f51a1f708e766a06848226660
+          TARGET_TREE=df27eb8da630939bc8dccd58e45f8d041c0c3eb8
+          LIVE_BASE=a0a63a1bc21115ba8da7fed6fdb695522dd37c96
+          BUNDLE=hermes-agent-0aa760f.bundle
+
+          git update-ref refs/heads/deploy-target "$TARGET"
+          git bundle create "$BUNDLE" refs/heads/deploy-target
+          git bundle verify "$BUNDLE"
+          test "$(git bundle list-heads "$BUNDLE" refs/heads/deploy-target | awk '{print $1}')" = "$TARGET"
+          sha256sum "$BUNDLE" | tee "${BUNDLE}.sha256"
+
+          rm -rf /tmp/bundle-verify
+          git clone -q -b deploy-target "$BUNDLE" /tmp/bundle-verify
+          test "$(git -C /tmp/bundle-verify rev-parse refs/heads/deploy-target)" = "$TARGET"
+          test "$(git -C /tmp/bundle-verify rev-parse refs/heads/deploy-target^{tree})" = "$TARGET_TREE"
+
+          cat > deploy-manifest.txt <<EOF
+          TARGET_HEAD=$TARGET
+          TARGET_TREE=$TARGET_TREE
+          LIVE_BASE=$LIVE_BASE
+          DEPLOY_REF=refs/heads/deploy-target
+          HISTORY=COMPLETE
+          NET_COMMITS_FROM_LIVE=1
+          NET_CHANGED_FILES=7
+          BUNDLE=hermes-agent-0aa760f.bundle
+          EOF
+
+      - name: Upload exact bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-management-conversation-0aa760f-git-bundle
+          path: |
+            hermes-agent-0aa760f.bundle
+            hermes-agent-0aa760f.bundle.sha256
+            deploy-manifest.txt
+          if-no-files-found: error
