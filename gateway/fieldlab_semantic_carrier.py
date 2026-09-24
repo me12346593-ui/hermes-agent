@@ -164,6 +164,25 @@ def _configured_model_and_runtime() -> tuple[str, dict[str, Any]]:
     return model, runtime
 
 
+def _deny_fieldlab_recovery(*_args: Any, **_kwargs: Any) -> bool:
+    """Operation-local fail-closed guard: never issue a second model request."""
+
+    return False
+
+
+_FIELDLAB_RECOVERY_METHODS = (
+    "_try_activate_fallback",
+    "_try_recover_primary_transport",
+    "_try_recover_stale_copilot_credential",
+    "_try_refresh_anthropic_client_credentials",
+    "_try_refresh_codex_client_credentials",
+    "_try_refresh_copilot_client_credentials",
+    "_try_refresh_env_client_credentials",
+    "_try_refresh_nous_client_credentials",
+    "_try_refresh_vertex_client_credentials",
+)
+
+
 def _harden_agent_runtime(agent: Any) -> None:
     """Operation-local hardening; never mutates Hermes global provider policy."""
 
@@ -171,6 +190,8 @@ def _harden_agent_runtime(agent: Any) -> None:
     agent._fallback_chain = []
     agent._fallback_model = None
     agent._fallback_index = 0
+    for method_name in _FIELDLAB_RECOVERY_METHODS:
+        setattr(agent, method_name, _deny_fieldlab_recovery)
     agent._budget_grace_call = False
     agent.compression_enabled = False
     agent._intent_ack_continuation = False
@@ -215,6 +236,9 @@ def _assert_agent_isolation(agent: Any) -> None:
         raise FieldLabSemanticCarrierError("FIELDLAB_PROVIDER_FALLBACK_NOT_DISABLED")
     if getattr(agent, "_fallback_model", None) is not None:
         raise FieldLabSemanticCarrierError("FIELDLAB_PROVIDER_FALLBACK_NOT_DISABLED")
+    for method_name in _FIELDLAB_RECOVERY_METHODS:
+        if getattr(agent, method_name, None) is not _deny_fieldlab_recovery:
+            raise FieldLabSemanticCarrierError("FIELDLAB_PROVIDER_RECOVERY_NOT_DISABLED")
     if bool(getattr(agent, "compression_enabled", True)):
         raise FieldLabSemanticCarrierError("FIELDLAB_COMPRESSION_NOT_DISABLED")
     if bool(getattr(agent, "_budget_grace_call", False)):
