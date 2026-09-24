@@ -32659,6 +32659,26 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         logger.debug("Control socket startup failed (non-fatal): %s", _cs_exc)
         _control_server = None
 
+    # FieldLab semantic carrier: a dedicated sibling-isolated local IPC surface.
+    # It is deliberately NOT mounted on gateway.sock and does not reuse the
+    # Supply bridge.  The dedicated parent directory + ACL are deployment-owned;
+    # if that permission surface has not been provisioned, startup is a no-op.
+    _fieldlab_semantic_server = None
+    try:
+        from gateway.fieldlab_semantic_carrier import FieldLabSemanticUnixServer
+
+        _fieldlab_semantic_server = FieldLabSemanticUnixServer()
+        if not _fieldlab_semantic_server.start():
+            _fieldlab_semantic_server = None
+        else:
+            atexit.register(_fieldlab_semantic_server.cleanup_files)
+    except Exception as _fieldlab_semantic_exc:
+        logger.debug(
+            "FieldLab semantic carrier startup failed (non-fatal): %s",
+            _fieldlab_semantic_exc,
+        )
+        _fieldlab_semantic_server = None
+
     # Lifecycle ledger (NS-608): report if the previous gateway life died
     # uncleanly (SIGKILL / OOM / VM death — no exit path ran), then claim
     # the sentinel for this life. Placed after the PID-file/lock claim so
@@ -32868,6 +32888,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # Wait for shutdown
     await runner.wait_for_shutdown()
+
+    # Stop the FieldLab semantic carrier before the generic control socket.
+    # It owns no durable state; shutdown only closes the dedicated local socket.
+    if _fieldlab_semantic_server is not None:
+        try:
+            await asyncio.to_thread(_fieldlab_semantic_server.stop)
+        except Exception:
+            logger.debug(
+                "FieldLab semantic carrier stop failed (non-fatal)",
+                exc_info=True,
+            )
 
     # Stop the control socket first: once shutdown begins this process is no
     # longer a truthful "the gateway is serving here" answer, and a successor
