@@ -161,6 +161,12 @@ def _configured_model_and_runtime() -> tuple[str, dict[str, Any]]:
         raise FieldLabSemanticCarrierError("HERMES_PROVIDER_RUNTIME_INVALID")
     if str(runtime.get("provider") or "").strip().lower() in {"", "auto", "moa"}:
         raise FieldLabSemanticCarrierError("HERMES_PROVIDER_RUNTIME_INVALID")
+    api_mode = str(runtime.get("api_mode") or "").strip().lower()
+    if api_mode == "codex_app_server":
+        raise FieldLabSemanticCarrierError("FIELDLAB_AGENT_PROVIDER_FORBIDDEN")
+    base_url = str(runtime.get("base_url") or "").strip().lower()
+    if base_url.startswith(("acp://", "acp+tcp://")):
+        raise FieldLabSemanticCarrierError("FIELDLAB_AGENT_PROVIDER_FORBIDDEN")
     return model, runtime
 
 
@@ -181,6 +187,45 @@ _FIELDLAB_RECOVERY_METHODS = (
     "_try_refresh_nous_client_credentials",
     "_try_refresh_vertex_client_credentials",
 )
+
+
+_FIELDLAB_MODEL_CALL_METHODS = (
+    "_interruptible_api_call",
+    "_interruptible_streaming_api_call",
+)
+
+
+def _install_one_model_attempt_guard(agent: Any) -> None:
+    """Block every second physical model-call entry, regardless of retry reason."""
+
+    if bool(getattr(agent, "_fieldlab_one_model_attempt_guard_installed", False)):
+        return
+    lock = threading.Lock()
+    counter = {"count": 0}
+    guarded = 0
+
+    for method_name in _FIELDLAB_MODEL_CALL_METHODS:
+        original = getattr(agent, method_name, None)
+        if not callable(original):
+            continue
+
+        def one_shot(*args: Any, __original=original, **kwargs: Any):
+            with lock:
+                if counter["count"] >= 1:
+                    raise FieldLabSemanticCarrierError(
+                        "FIELDLAB_SECOND_MODEL_ATTEMPT_BLOCKED"
+                    )
+                counter["count"] += 1
+            return __original(*args, **kwargs)
+
+        one_shot._fieldlab_one_shot_guard = True  # type: ignore[attr-defined]
+        setattr(agent, method_name, one_shot)
+        guarded += 1
+
+    if guarded != len(_FIELDLAB_MODEL_CALL_METHODS):
+        raise FieldLabSemanticCarrierError("FIELDLAB_MODEL_CALL_GUARD_UNAVAILABLE")
+    agent._fieldlab_model_attempt_counter = counter
+    agent._fieldlab_one_model_attempt_guard_installed = True
 
 
 def _harden_agent_runtime(agent: Any) -> None:
@@ -204,6 +249,7 @@ def _harden_agent_runtime(agent: Any) -> None:
     agent._persist_disabled = True
     agent.ephemeral_system_prompt = None
     agent._cached_system_prompt = FIELDLAB_SEMANTIC_SYSTEM_PROMPT
+    _install_one_model_attempt_guard(agent)
 
 
 def _assert_agent_isolation(agent: Any) -> None:
@@ -249,6 +295,12 @@ def _assert_agent_isolation(agent: Any) -> None:
         raise FieldLabSemanticCarrierError("FIELDLAB_SYSTEM_PROMPT_NOT_ISOLATED")
     if getattr(agent, "ephemeral_system_prompt", None):
         raise FieldLabSemanticCarrierError("FIELDLAB_SYSTEM_PROMPT_NOT_ISOLATED")
+    if not bool(getattr(agent, "_fieldlab_one_model_attempt_guard_installed", False)):
+        raise FieldLabSemanticCarrierError("FIELDLAB_MODEL_CALL_GUARD_UNAVAILABLE")
+    for method_name in _FIELDLAB_MODEL_CALL_METHODS:
+        guarded = getattr(agent, method_name, None)
+        if not bool(getattr(guarded, "_fieldlab_one_shot_guard", False)):
+            raise FieldLabSemanticCarrierError("FIELDLAB_MODEL_CALL_GUARD_UNAVAILABLE")
 
 
 def build_fieldlab_isolated_agent(timeout: float) -> Any:
