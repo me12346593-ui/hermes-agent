@@ -157,6 +157,12 @@ class FieldLabSemanticCarrierTests(unittest.TestCase):
         self.assertFalse(fake.compression_enabled)
         self.assertFalse(fake._budget_grace_call)
         self.assertTrue(fake._persist_disabled)
+        for method_name in carrier._FIELDLAB_RECOVERY_METHODS:
+            self.assertIs(
+                getattr(fake, method_name),
+                carrier._deny_fieldlab_recovery,
+            )
+            self.assertFalse(getattr(fake, method_name)())
 
     def test_transport_metadata_stays_outside_exact_capsule(self):
         capsule = _capsule()
