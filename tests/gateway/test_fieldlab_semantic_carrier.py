@@ -85,6 +85,15 @@ class _FakeAgent:
         self.ephemeral_system_prompt = None
         self.prompt = None
         self.closed = False
+        self.physical_model_calls = []
+
+    def _interruptible_api_call(self, api_kwargs):
+        self.physical_model_calls.append(("nonstream", api_kwargs))
+        return {"ok": True}
+
+    def _interruptible_streaming_api_call(self, api_kwargs, *, on_first_delta=None):
+        self.physical_model_calls.append(("stream", api_kwargs))
+        return {"ok": True}
 
     def run_conversation(self, prompt: str) -> dict:
         self.prompt = prompt
@@ -163,6 +172,22 @@ class FieldLabSemanticCarrierTests(unittest.TestCase):
                 carrier._deny_fieldlab_recovery,
             )
             self.assertFalse(getattr(fake, method_name)())
+        self.assertTrue(fake._fieldlab_one_model_attempt_guard_installed)
+        for method_name in carrier._FIELDLAB_MODEL_CALL_METHODS:
+            guarded = getattr(fake, method_name)
+            self.assertTrue(getattr(guarded, "_fieldlab_one_shot_guard", False))
+
+    def test_physical_model_call_guard_blocks_second_outbound_entry(self):
+        fake = _FakeAgent(_person_result())
+        carrier._harden_agent_runtime(fake)
+        first = fake._interruptible_api_call({"messages": []})
+        self.assertEqual(first, {"ok": True})
+        with self.assertRaisesRegex(
+            carrier.FieldLabSemanticCarrierError,
+            "FIELDLAB_SECOND_MODEL_ATTEMPT_BLOCKED",
+        ):
+            fake._interruptible_streaming_api_call({"messages": []})
+        self.assertEqual(len(fake.physical_model_calls), 1)
 
     def test_transport_metadata_stays_outside_exact_capsule(self):
         capsule = _capsule()
